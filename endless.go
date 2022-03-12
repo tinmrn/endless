@@ -15,7 +15,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
 	// "github.com/fvbock/uds-go/introspect"
 )
 
@@ -106,7 +105,7 @@ func NewServer(addr string, handler http.Handler) (srv *endlessServer) {
 		sigChan: make(chan os.Signal),
 		isChild: isChild,
 		SignalHooks: map[int]map[os.Signal][]func(){
-			PRE_SIGNAL: map[os.Signal][]func(){
+			PRE_SIGNAL: {
 				syscall.SIGHUP:  []func(){},
 				syscall.SIGUSR1: []func(){},
 				syscall.SIGUSR2: []func(){},
@@ -114,7 +113,7 @@ func NewServer(addr string, handler http.Handler) (srv *endlessServer) {
 				syscall.SIGTERM: []func(){},
 				syscall.SIGTSTP: []func(){},
 			},
-			POST_SIGNAL: map[os.Signal][]func(){
+			POST_SIGNAL: {
 				syscall.SIGHUP:  []func(){},
 				syscall.SIGUSR1: []func(){},
 				syscall.SIGUSR2: []func(){},
@@ -221,7 +220,10 @@ func (srv *endlessServer) ListenAndServe() (err error) {
 	srv.EndlessListener = newEndlessListener(l, srv)
 
 	if srv.isChild {
-		syscall.Kill(syscall.Getppid(), syscall.SIGTERM)
+		err = syscall.Kill(syscall.Getppid(), syscall.SIGTERM)
+		if err != nil {
+			log.Printf("endless: error killing child: %v", err)
+		}
 	}
 
 	srv.BeforeBegin(srv.Addr)
@@ -246,18 +248,25 @@ func (srv *endlessServer) ListenAndServeTLS(certFile, keyFile string) (err error
 		addr = ":https"
 	}
 
-	config := &tls.Config{}
+	var config *tls.Config
+
 	if srv.TLSConfig != nil {
-		*config = *srv.TLSConfig
+		config = srv.TLSConfig
+	} else {
+		config = &tls.Config{}
 	}
 	if config.NextProtos == nil {
 		config.NextProtos = []string{"http/1.1"}
 	}
 
-	config.Certificates = make([]tls.Certificate, 1)
-	config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return
+	configHasCert := len(config.Certificates) > 0 || config.GetCertificate != nil
+	if !configHasCert || certFile != "" || keyFile != "" {
+		var err error
+		config.Certificates = make([]tls.Certificate, 1)
+		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	go srv.handleSignals()
@@ -272,7 +281,10 @@ func (srv *endlessServer) ListenAndServeTLS(certFile, keyFile string) (err error
 	srv.EndlessListener = tls.NewListener(srv.tlsInnerListener, config)
 
 	if srv.isChild {
-		syscall.Kill(syscall.Getppid(), syscall.SIGTERM)
+		err = syscall.Kill(syscall.Getppid(), syscall.SIGTERM)
+		if err != nil {
+			log.Printf("endless: error killing child: %v", err)
+		}
 	}
 
 	log.Println(syscall.Getpid(), srv.Addr)
@@ -489,11 +501,18 @@ type endlessListener struct {
 func (el *endlessListener) Accept() (c net.Conn, err error) {
 	tc, err := el.Listener.(*net.TCPListener).AcceptTCP()
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	tc.SetKeepAlive(true)                  // see http.tcpKeepAliveListener
-	tc.SetKeepAlivePeriod(3 * time.Minute) // see http.tcpKeepAliveListener
+	err = tc.SetKeepAlive(true) // see http.tcpKeepAliveListener
+	if err != nil {
+		return nil, err
+	}
+
+	err = tc.SetKeepAlivePeriod(3 * time.Minute) // see http.tcpKeepAliveListener
+	if err != nil {
+		return nil, err
+	}
 
 	c = endlessConn{
 		Conn:   tc,
